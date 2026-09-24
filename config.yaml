@@ -1,0 +1,166 @@
+# domain-wind 配置模板。
+# 复制为 config.local.yaml 填写本地敏感配置（webhook），本文件保留默认值入库。
+
+# RSS 数据源（首版仅公开 RSS；成交源 NameBio 预留，暂不启用）
+sources:
+  dnjournal:
+    enabled: true
+    url: "http://www.dnjournal.com/rss.xml"
+  dnwire:
+    enabled: true
+    url: "https://domainnamewire.com/feed/"
+  namepros:
+    enabled: true
+    url: "https://www.namepros.com/external.php?type=rss2"
+
+# 热词分析
+analyze:
+  baseline_days: 7       # 对比基线天数
+  new_min: 2             # 新冒头：今日独立条目提及 ≥ N
+  surge_min: 3           # 暴增：今日独立条目提及 ≥ N
+  surge_ratio: 3         # 暴增：今日 ≥ 基线日均 × N
+  top_k: 15              # 热词最多上报条数
+  news_limit: 20         # 报告「今日资讯」最多条数
+  community_limit: 15    # 报告「社区讨论」最多条数
+  min_word_len: 3
+  max_word_len: 20
+  # 停用词（小写）；也可追加到 data/stopwords.txt（每行一词）
+  stopwords:
+    - the
+    - and
+    - for
+    - with
+    - from
+    - that
+    - this
+    - are
+    - was
+    - were
+    - have
+    - has
+    - had
+    - not
+    - but
+    - you
+    - your
+    - our
+    - all
+    - any
+    - can
+    - will
+    - just
+    - into
+    - about
+    - after
+    - before
+    - over
+    - under
+    - more
+    - most
+    - some
+    - such
+    - than
+    - then
+    - when
+    - what
+    - which
+    - who
+    - how
+    - why
+    - out
+    - new
+    - now
+    - also
+    - only
+    - other
+    - their
+    - them
+    - they
+    - there
+    - here
+    - been
+    - being
+    - does
+    - did
+    - doing
+    - domain
+    - domains
+    - name
+    - names
+    - sale
+    - sales
+    - sold
+    - sell
+    - selling
+    - buyer
+    - buyers
+    - seller
+    - sellers
+    - auction
+    - auctions
+    - market
+    - marketplace
+    - aftermarket
+    - registrar
+    - registry
+    - tld
+    - gtld
+    - cctld
+    - com
+    - net
+    - org
+    - info
+    - news
+    - report
+    - reports
+    - weekly
+    - daily
+    - today
+    - week
+    - month
+    - year
+    - http
+    - https
+    - www
+    - click
+    - read
+    - more
+    - via
+    - per
+    - amp
+    - html
+    - php
+    - rss
+    - feed
+    - thread
+    - threads
+    - forum
+    - post
+    - posts
+    - comment
+    - comments
+    - discussion
+    - namepros
+    - dnjournal
+    - domainnamewire
+    - dnwire
+
+# 热词 → 候选域名 → 占用粗检（写入日报第四节）
+candidates:
+  enabled: true
+  tlds: [com]
+  max_per_word: 10
+  min_hot_count: 1
+  prefixes: [get, try, the, my, ai]
+  suffixes: [hq, hub, lab, app, ly, ai]
+  check_concurrency: 5
+  report_free_limit: 30      # 日报「可能可注册」最多条数
+  report_taken_sample: 5     # 日报「已注册」抽样条数
+  max_total: 60              # 全局候选上限（控制粗检耗时）
+
+# 通知
+notify:
+  # 企业微信机器人 webhook URL（敏感信息放 config.local.yaml 的 notify.webhook_url）
+  webhook_url: ""
+  # 当日无热词且无新资讯时是否仍推送（false = 不推送，只落盘报告）
+  notify_when_quiet: false
