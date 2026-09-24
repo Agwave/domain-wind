@@ -60,7 +60,7 @@ func usage() {
   --date YYYY-MM-DD            指定日期（run/report）
   --data-dir DIR               数据目录（默认 data/）
   --file PATH                  check：从文件读域名（每行一个）
-  --concurrency N              check：并发数（默认 5）
+  --concurrency N              check：并发数（默认 3）
   --skip-candidates            run/report：跳过热词候选生成与占用粗检`)
 }
 
@@ -300,9 +300,17 @@ func fetchAll(ctx context.Context, cfg *config.Config, date string) (*store.Snap
 	for _, id := range ids {
 		src := cfg.Sources[id]
 		wg.Add(1)
-		go func(id, url string) {
+		go func(id string, src config.Source) {
 			defer wg.Done()
-			items, err := fc.FetchSource(ctx, url)
+			var (
+				items []fetch.Item
+				err   error
+			)
+			if src.IsGitHubTrending() {
+				items, err = fc.FetchGitHubTrending(ctx, src.URL)
+			} else {
+				items, err = fc.FetchSource(ctx, src.URL)
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -311,7 +319,7 @@ func fetchAll(ctx context.Context, cfg *config.Config, date string) (*store.Snap
 				return
 			}
 			snap.Sources[id] = items
-		}(id, src.URL)
+		}(id, src)
 	}
 	wg.Wait()
 	sort.Strings(failed)
@@ -335,7 +343,7 @@ func analyzeReportAndNotify(cfg *config.Config, snap *store.Snapshot, date strin
 		checks = runCandidateChecks(cfg, res)
 	}
 
-	md := report.Build(date, res, snap.Failed, cfg.Analyze.NewsLimit, cfg.Analyze.CommunityLimit,
+	md := report.Build(date, res, snap.Failed, cfg.Analyze.CommunityLimit,
 		checks, cfg.Candidates.ReportFreeLimit, cfg.Candidates.ReportTakenSample)
 
 	reportDir := filepath.Join(dir, "reports")
@@ -344,11 +352,11 @@ func analyzeReportAndNotify(cfg *config.Config, snap *store.Snapshot, date strin
 	}
 	fmt.Println(md)
 
-	hasContent := len(res.HotWords) > 0 || len(res.Signals) > 0 || len(res.News) > 0 || len(res.Community) > 0
+	hasContent := len(res.HotWords) > 0 || len(res.Signals) > 0 || len(res.Community) > 0
 
 	if _, dry := opts["dry-run"]; !dry && cfg.Notify.WebhookURL != "" {
 		if !hasContent && !cfg.Notify.NotifyWhenQuiet && !res.Baseline {
-			fmt.Println("ℹ️ 今日无热词且无新资讯，不推送（notify_when_quiet=false）")
+			fmt.Println("ℹ️ 今日无热词且无社区内容，不推送（notify_when_quiet=false）")
 		} else {
 			if err := notifyAll(cfg, date, hasContent, res.Baseline, md, dir); err != nil {
 				fmt.Fprintln(os.Stderr, "推送失败:", err)
@@ -421,7 +429,7 @@ func notifyAll(cfg *config.Config, date string, hasContent, baseline bool, md, d
 	case !hasContent:
 		kind = "quiet"
 		header := fmt.Sprintf("# 域名投资资讯 · %s", date)
-		msgs = []string{header + "\n\n今日无热词信号，也无新资讯。" + footer}
+		msgs = []string{header + "\n\n今日无热词信号，也无社区讨论。" + footer}
 	default:
 		var err error
 		msgs, err = notify.BuildMessages("", md, footer)

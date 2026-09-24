@@ -12,12 +12,13 @@ import (
 
 // SourceLabels 源 ID → 展示名。
 var SourceLabels = map[string]string{
-	"dnjournal": "DNJournal",
-	"dnwire":    "Domain Name Wire",
-	"namepros":  "NamePros",
+	"dnjournal":       "DNJournal",
+	"dnwire":          "Domain Name Wire",
+	"namepros":        "NamePros",
+	"github_trending": "GitHub Trending",
 }
 
-// DomainCheck 候选域名粗检结果（写入报告第四节）。
+// DomainCheck 候选域名粗检结果（写入报告第三节）。
 type DomainCheck struct {
 	Domain  string
 	Word    string
@@ -27,10 +28,10 @@ type DomainCheck struct {
 }
 
 // Build 生成完整日报。
-func Build(date string, res *analyze.Result, failed []string, newsLimit, communityLimit int, checks []DomainCheck, freeLimit, takenSample int) string {
+func Build(date string, res *analyze.Result, failed []string, communityLimit int, checks []DomainCheck, freeLimit, takenSample int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# 域名投资资讯 · %s\n", date)
-	b.WriteString("> 数据源：DNJournal / Domain Name Wire / NamePros（公开 RSS）· 热词仅从标题抽取，优先品牌/SLD 形态\n\n")
+	b.WriteString("> 数据源：DNJournal / Domain Name Wire / NamePros（RSS）· GitHub Trending · 热词仅从标题抽取，优先品牌/SLD 形态\n\n")
 	if res != nil && res.Baseline {
 		b.WriteString("> ℹ️ 首次运行：已建立基线；下方「今日高频」可直接看；明日起额外对比新冒头/暴增。\n\n")
 	}
@@ -48,8 +49,6 @@ func Build(date string, res *analyze.Result, failed []string, newsLimit, communi
 
 	b.WriteString(hotSection(res))
 	b.WriteString("\n")
-	b.WriteString(newsSection(res, newsLimit))
-	b.WriteString("\n")
 	b.WriteString(communitySection(res, communityLimit))
 	if checks != nil {
 		b.WriteString("\n")
@@ -60,7 +59,7 @@ func Build(date string, res *analyze.Result, failed []string, newsLimit, communi
 
 func candidatesSection(checks []DomainCheck, freeLimit, takenSample int) string {
 	var b strings.Builder
-	b.WriteString("## 四、候选域名粗检\n\n")
+	b.WriteString("## 三、候选域名粗检\n\n")
 	b.WriteString("> 由今日热词按模板生成（前后缀含 ai）· RDAP+DNS · 非注册商下单保证\n\n")
 	if len(checks) == 0 {
 		b.WriteString("（无候选）\n")
@@ -197,29 +196,9 @@ func writeEvidence(b *strings.Builder, ev []analyze.Evidence) {
 	}
 }
 
-func newsSection(res *analyze.Result, limit int) string {
-	var b strings.Builder
-	b.WriteString("## 二、今日资讯\n\n")
-	if res == nil || len(res.News) == 0 {
-		b.WriteString("（无）\n")
-		return b.String()
-	}
-	items := res.News
-	if limit > 0 && len(items) > limit {
-		items = items[:limit]
-	}
-	for i := range items {
-		writeItem(&b, &items[i])
-	}
-	if limit > 0 && len(res.News) > limit {
-		fmt.Fprintf(&b, "\n… 另有 %d 条未列出\n", len(res.News)-limit)
-	}
-	return b.String()
-}
-
 func communitySection(res *analyze.Result, limit int) string {
 	var b strings.Builder
-	b.WriteString("## 三、社区讨论\n\n")
+	b.WriteString("## 二、社区讨论\n\n")
 	if res == nil || len(res.Community) == 0 {
 		b.WriteString("（无）\n")
 		return b.String()

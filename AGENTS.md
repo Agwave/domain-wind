@@ -67,7 +67,47 @@ source ~/.g/env && gofmt -w cmd internal && go build ./... && go vet ./... && go
 | `internal/analyze` | `TestSameItemWordOnce` | 同条目只计一次 |
 | `internal/fetch` | `TestParseList` / `TestParseSingleEntry` / `TestParseEmpty` / `TestParseAtom` | RSS/Atom 解析 |
 | `internal/fetch` | `TestDedupKey` | 去重键 |
+| `internal/fetch` | `TestParseTrendingHTML` / `TestFetchGitHubTrendingRetries` 等 | GitHub 趋势榜 HTML 解析与重试 |
 | `internal/notify` | `TestBuildMessagesShort` / `TestBuildMessagesSplit` / `TestNewEmptyWebhook` | 拆条与空 webhook |
-| `internal/report` | `TestBuildBaseline` / `TestBuildSignals` | 报告结构 |
+| `internal/report` | `TestBuildBaseline` / `TestBuildSignals` / `TestBuildCandidates` | 报告结构（无「今日资讯」、候选第三节） |
 | `internal/avail` | `TestNormalizeDomain` / `TestDecide` / `TestCheckRDAPWithMock` | 域名规范化、状态判定、RDAP mock |
+| `internal/avail` | `TestCheckRDAPRetries429ThenFree` / `TestCheckRDAPExhaustsRetries` / `TestDefaultConcurrency` | RDAP 429 重试与默认并发 |
 | `internal/candidates` | `TestGenerateBasic` / `TestGenerateMinCountAndDedupe` / `TestGenerateMaxPerWord` | 热词候选生成 |
+
+## 4. 域名占用探测（工具用法）
+
+用户要求探测域名是否可注册时，用本工具即可。**勿在本文写死或优先某一类热词/赛道**——关键词与造词方向由当次任务、报告热词与用户意图决定，不由本节预设。
+
+粗检：`./bin/domainwind check …`（RDAP + DNS，见 README）。并发、429/超时重试、请求间隔已由 `internal/avail` 处理，一般直接跑即可。
+
+### 4.1 工作流
+
+1. 按任务需要收集候选域名（可来自报告热词、用户给定列表、当次自行检索等）。
+2. 批量粗检（文件每行一个域名，`#` 开头为注释）：
+
+```bash
+./bin/domainwind check --file candidates.txt
+# 或：./bin/domainwind check d1.com d2.ai
+```
+
+3. 按 4.2 解读结果后再交付。默认模板生成的前后缀名（`get/try/the/my` + 词）与报告第三节整表**不等于**投资建议，需结合当次判断筛选。
+
+### 4.2 结果怎么读
+
+| 状态 | 含义 | 处理 |
+|---|---|---|
+| `已注册` | RDAP 200 或有 NS | 视为已占用 |
+| `可能可注册` | RDAP 404 且无 NS | 可列入结果；**仍须注册商二次确认**（保留名/溢价/冻结期） |
+| `未知` | 探测失败 | **不可当可注册**；可再 `check` 一次；仍未知则标「待确认」或排除 |
+
+- 汇总行：`合计 N：已注册 A · 可能可注册 B · 未知 C`（统计时排除含「合计」的行）
+- 粗检 ≠ 注册商购物车可买保证
+
+### 4.3 命令速查
+
+```bash
+go build -o bin/domainwind ./cmd/domainwind
+./bin/domainwind check --file candidates.txt
+./bin/domainwind report --date YYYY-MM-DD --dry-run
+./bin/domainwind report --skip-candidates
+```

@@ -10,10 +10,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Source 单个 RSS 数据源。
+// SourceTypeRSS 与空 Type 均表示 RSS/Atom。
+const (
+	SourceTypeRSS            = "rss"
+	SourceTypeGitHubTrending = "github_trending"
+)
+
+// DefaultGitHubTrendingURL 每日、不限语言的 GitHub 趋势榜。
+const DefaultGitHubTrendingURL = "https://github.com/trending?since=daily"
+
+// Source 单个数据源（RSS 或 github_trending）。
 type Source struct {
 	Enabled bool   `yaml:"enabled"`
 	URL     string `yaml:"url"`
+	Type    string `yaml:"type"` // ""|"rss"| "github_trending"
+}
+
+// IsGitHubTrending 是否为 GitHub 趋势榜源。
+func (s Source) IsGitHubTrending() bool {
+	return strings.EqualFold(strings.TrimSpace(s.Type), SourceTypeGitHubTrending)
 }
 
 // Analyze 热词分析参数。
@@ -23,7 +38,6 @@ type Analyze struct {
 	SurgeMin       int      `yaml:"surge_min"`
 	SurgeRatio     float64  `yaml:"surge_ratio"`
 	TopK           int      `yaml:"top_k"`
-	NewsLimit      int      `yaml:"news_limit"`
 	CommunityLimit int      `yaml:"community_limit"`
 	MinWordLen     int      `yaml:"min_word_len"`
 	MaxWordLen     int      `yaml:"max_word_len"`
@@ -59,9 +73,9 @@ type Config struct {
 }
 
 // DefaultSourceOrder 报告与抓取的默认源顺序。
-var DefaultSourceOrder = []string{"dnjournal", "dnwire", "namepros"}
+var DefaultSourceOrder = []string{"dnjournal", "dnwire", "namepros", "github_trending"}
 
-// NewsSources 计入「今日资讯」的源。
+// NewsSources 资讯类源（条目仍参与热词；报告不再单独列「今日资讯」）。
 var NewsSources = map[string]bool{"dnjournal": true, "dnwire": true}
 
 // CommunitySources 计入「社区讨论」的源。
@@ -91,20 +105,28 @@ func (c *Config) fillDefaults() {
 		c.Sources = make(map[string]Source)
 	}
 	defaults := map[string]string{
-		"dnjournal": "http://www.dnjournal.com/rss.xml",
-		"dnwire":    "https://domainnamewire.com/feed/",
-		"namepros":  "https://www.namepros.com/external.php?type=rss2",
+		"dnjournal":       "http://www.dnjournal.com/rss.xml",
+		"dnwire":          "https://domainnamewire.com/feed/",
+		"namepros":        "https://www.namepros.com/external.php?type=rss2",
+		"github_trending": DefaultGitHubTrendingURL,
 	}
 	for id, url := range defaults {
 		s, ok := c.Sources[id]
 		if !ok {
-			c.Sources[id] = Source{Enabled: true, URL: url}
+			src := Source{Enabled: true, URL: url}
+			if id == "github_trending" {
+				src.Type = SourceTypeGitHubTrending
+			}
+			c.Sources[id] = src
 			continue
+		}
+		if id == "github_trending" && strings.TrimSpace(s.Type) == "" {
+			s.Type = SourceTypeGitHubTrending
 		}
 		if s.URL == "" {
 			s.URL = url
-			c.Sources[id] = s
 		}
+		c.Sources[id] = s
 	}
 
 	a := &c.Analyze
@@ -122,9 +144,6 @@ func (c *Config) fillDefaults() {
 	}
 	if a.TopK <= 0 {
 		a.TopK = 15
-	}
-	if a.NewsLimit <= 0 {
-		a.NewsLimit = 20
 	}
 	if a.CommunityLimit <= 0 {
 		a.CommunityLimit = 15
@@ -155,7 +174,7 @@ func (c *Config) fillDefaults() {
 		cand.Suffixes = []string{"hq", "hub", "lab", "app", "ly", "ai"}
 	}
 	if cand.CheckConcurrency <= 0 {
-		cand.CheckConcurrency = 5
+		cand.CheckConcurrency = 3
 	}
 	if cand.ReportFreeLimit <= 0 {
 		cand.ReportFreeLimit = 30
@@ -194,19 +213,30 @@ func (c *Config) StopwordSet(extraFile string) map[string]bool {
 	return set
 }
 
+// sourceReady 已启用且可抓取（RSS 需 URL；github_trending 允许空 URL，由默认值补齐）。
+func sourceReady(s Source) bool {
+	if !s.Enabled {
+		return false
+	}
+	if s.IsGitHubTrending() {
+		return true
+	}
+	return s.URL != ""
+}
+
 // EnabledSources 返回已启用源（按默认顺序，其余按名字排序附加）。
 func (c *Config) EnabledSources() []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, id := range DefaultSourceOrder {
-		if s, ok := c.Sources[id]; ok && s.Enabled && s.URL != "" {
+		if s, ok := c.Sources[id]; ok && sourceReady(s) {
 			out = append(out, id)
 			seen[id] = true
 		}
 	}
 	var extra []string
 	for id, s := range c.Sources {
-		if seen[id] || !s.Enabled || s.URL == "" {
+		if seen[id] || !sourceReady(s) {
 			continue
 		}
 		extra = append(extra, id)

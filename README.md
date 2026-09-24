@@ -1,20 +1,21 @@
 # domain-wind · 域名投资资讯观察工具
 
-每天抓取 **DNJournal / Domain Name Wire / NamePros** 公开 RSS，对比近 N 日基线，
-筛选出「新冒头 / 暴增」热词（如 agent、jev），生成 Markdown 报告并推送到企业微信。
+每天抓取 **DNJournal / Domain Name Wire / NamePros** 公开 RSS，以及 **GitHub Trending**
+（HTML），对比近 N 日基线，筛选出「新冒头 / 暴增」热词，生成 Markdown 报告并推送到企业微信。
 
-> **首版定位**：资讯 + 社区热词信号。不接入 NameBio 付费 API / GoDaddy Auctions /
+> **首版定位**：资讯 + 社区 + 开发者趋势热词信号。不接入 NameBio 付费 API / GoDaddy Auctions /
 > 微博 / X。成交数据源接口已预留（`fetch.SalesSource`），二期可接。
 
 ## 功能特性
 
-- 📡 **每日抓取**：三源公开 RSS（可在 `config.yaml` 增删/开关）
+- 📡 **每日抓取**：三源公开 RSS + GitHub 趋势榜（可在 `config.yaml` 增删/开关；非 RSS 源设 `type: github_trending`）
 - 🔥 **热词判定**（阈值可配）：
   - 新冒头：今日独立条目提及 ≥ `new_min`，且基线日均 &lt; 0.5
   - 暴增：今日 ≥ `surge_min`，且今日 ≥ 基线日均 × `surge_ratio`
-- 🗂️ **报告四段**：热词信号 → 今日资讯 → 社区讨论 → 抓取状态
+- 🗂️ **报告三段**：热词信号 → 社区讨论 → 候选域名粗检（不再单列「今日资讯」）
 - 📝 **报告落盘**：`data/reports/YYYY-MM-DD.md`，快照存 `data/YYYY-MM-DD.json`
 - 📲 **企业微信推送**：完整报告，超长按行拆多条；无内容默认不打扰；同一天不重复推送
+- 🔎 **占用粗检**：RDAP+DNS；默认并发 3，遇 429/超时自动退避重试
 
 ## 快速开始
 
@@ -44,20 +45,22 @@ go build -o bin/domainwind ./cmd/domainwind
 | `domainwind check <domains...>` | RDAP+DNS 探测是否已注册 |
 | `--data-dir DIR` | 数据目录（默认 `data/`） |
 | `--file PATH` | `check`：从文件读域名（每行一个，`#` 注释） |
-| `--concurrency N` | `check`：并发数（默认 5） |
+| `--concurrency N` | `check`：并发数（默认 3；另有 RDAP 429/超时重试与最小请求间隔） |
 
 ### 域名占用粗检
 
 ```bash
 ./bin/domainwind check example.com igaminghub.com getagentic.com
-./bin/domainwind check --file candidates.txt --concurrency 8
+./bin/domainwind check --file candidates.txt --concurrency 2
 ```
 
 结果三种：`已注册` / `可能可注册` / `未知`。基于公共 RDAP + DNS NS，**不等于**注册商购物车可买保证。
 
-### 热词候选（写入日报第四节）
+默认偏保守以降低公共 RDAP 429：并发 **3**、RDAP 遇 429/5xx/超时最多额外重试 **2** 次（指数退避，尊重 `Retry-After`）、两次 RDAP 最小间隔约 **200ms**。仍大量「未知」时可再降 `--concurrency`。
 
-`run` / `report` 默认会：热词 → 模板生成候选（前后缀含 `ai`）→ 批量粗检 → 报告「四、候选域名粗检」。
+### 热词候选（写入日报第三节）
+
+`run` / `report` 默认会：热词 → 模板生成候选（前后缀含 `ai`）→ 批量粗检 → 报告「三、候选域名粗检」。
 
 ```bash
 ./bin/domainwind report --date 2026-09-24 --dry-run
@@ -94,6 +97,9 @@ sources:
   namepros:
     enabled: true
     url: "https://www.namepros.com/external.php?type=rss2"
+  github_trending:
+    enabled: true
+    type: github_trending
 
 analyze:
   baseline_days: 7
@@ -137,8 +143,9 @@ crontab -e
 | DNJournal | `http://www.dnjournal.com/rss.xml` | 行业资讯 / 周报成交摘要 |
 | Domain Name Wire | `https://domainnamewire.com/feed/` | 行业资讯 |
 | NamePros | `https://www.namepros.com/external.php?type=rss2` | 社区讨论热词 |
+| GitHub Trending | `https://github.com/trending?since=daily` | 每日趋势仓库名 → 热词（`type: github_trending`；描述入库，热词仍只抽标题） |
 
-RSS 全文仅供个人研究使用；请遵守各站服务条款。
+RSS 全文仅供个人研究使用；请遵守各站服务条款。GitHub 趋势榜为 HTML 抓取（比 RSS 更积极重试），页面改版可能导致该源失败（报告会标注，可设 `github_trending.enabled: false`）。
 
 ## 常见问题
 
@@ -146,7 +153,8 @@ RSS 全文仅供个人研究使用；请遵守各站服务条款。
 - **重复推送**：同一天相同内容不会推送第二次（`data/state.json` 记录指纹）
 - **首次运行**：无历史对比，只建立基线并推送确认消息
 - **抓取失败**：单源失败重试 2 次，仍失败在报告注明，不影响其他源
-- **NamePros 403**：NamePros 对部分网络启用 Cloudflare 挑战，直连 RSS 可能失败；报告会标注「抓取失败」，DNJournal / DNWire 仍正常。可暂时在 `config.yaml` 将 `namepros.enabled` 设为 `false`
+- **NamePros 403**：NamePros 对部分网络启用 Cloudflare 挑战，直连 RSS 可能失败；报告会标注「抓取失败」，其他源仍正常。可暂时在 `config.yaml` 将 `namepros.enabled` 设为 `false`
+- **GitHub Trending 失败**：HTML 大页易超时/断连，工具会多次退避重试；仍失败时报告标注即可，或临时 `github_trending.enabled: false`
 - **热词噪声**：调高 `new_min` / `surge_min`，或把噪声词加入 `stopwords`
 
 ## 许可证

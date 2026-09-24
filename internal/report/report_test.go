@@ -19,7 +19,7 @@ func TestBuildBaseline(t *testing.T) {
 			{Source: "dnwire", Item: fetch.Item{Title: "Hello", Link: "https://x"}},
 		},
 	}
-	md := Build("2026-09-24", res, nil, 20, 15, nil, 0, 0)
+	md := Build("2026-09-24", res, nil, 15, nil, 0, 0)
 	if !strings.Contains(md, "域名投资资讯 · 2026-09-24") {
 		t.Error("missing title")
 	}
@@ -29,8 +29,11 @@ func TestBuildBaseline(t *testing.T) {
 	if !strings.Contains(md, "agent") {
 		t.Error("missing agent")
 	}
-	if !strings.Contains(md, "Hello") {
-		t.Error("missing news")
+	if strings.Contains(md, "今日资讯") {
+		t.Error("news section should be removed")
+	}
+	if strings.Contains(md, "Hello") {
+		t.Error("news item should not appear in report")
 	}
 }
 
@@ -48,7 +51,7 @@ func TestBuildSignals(t *testing.T) {
 			},
 		},
 	}
-	md := Build("2026-09-24", res, []string{"namepros"}, 20, 15, nil, 0, 0)
+	md := Build("2026-09-24", res, []string{"namepros"}, 15, nil, 0, 0)
 	if !strings.Contains(md, "新冒头") {
 		t.Error("missing new section")
 	}
@@ -66,7 +69,7 @@ func TestBuildCandidates(t *testing.T) {
 		{Domain: "igaminglab.com", Word: "igaming", Pattern: "suffix:lab", Status: avail.StatusLikelyFree},
 		{Domain: "igaming.com", Word: "igaming", Pattern: "bare", Status: avail.StatusTaken},
 	}
-	md := Build("2026-09-24", res, nil, 20, 15, checks, 30, 5)
+	md := Build("2026-09-24", res, nil, 15, checks, 30, 5)
 	if !strings.Contains(md, "候选域名粗检") {
 		t.Fatal("missing section")
 	}

@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +25,15 @@ const (
 	StatusLikelyFree Status = "likely_free"
 	// StatusUnknown 无法判断。
 	StatusUnknown Status = "unknown"
+)
+
+// 批检默认参数（公共 RDAP 易 429/超时，默认偏保守）。
+const (
+	DefaultConcurrency = 3
+	DefaultMaxRetries  = 2 // 额外重试次数（总尝试 = 1 + MaxRetries）
+	DefaultMinInterval = 200 * time.Millisecond
+	DefaultBackoffBase = 400 * time.Millisecond
+	maxRetryAfter      = 10 * time.Second
 )
 
 // Result 单域名探测结果。
@@ -48,6 +59,13 @@ type Client struct {
 	rdapBase string // 默认 https://rdap.org/domain ；单测可改
 	skipDNS  bool
 	conc     int
+
+	maxRetries  int
+	minInterval time.Duration
+	backoffBase time.Duration
+
+	mu       sync.Mutex
+	lastRDAP time.Time
 }
 
 // New 创建客户端。
@@ -62,9 +80,12 @@ func New() *Client {
 				return nil
 			},
 		},
-		resolver: net.DefaultResolver,
-		rdapBase: "https://rdap.org/domain",
-		conc:     5,
+		resolver:    net.DefaultResolver,
+		rdapBase:    "https://rdap.org/domain",
+		conc:        DefaultConcurrency,
+		maxRetries:  DefaultMaxRetries,
+		minInterval: DefaultMinInterval,
+		backoffBase: DefaultBackoffBase,
 	}
 }
 
@@ -73,6 +94,18 @@ func (c *Client) SetConcurrency(n int) {
 	if n > 0 {
 		c.conc = n
 	}
+}
+
+// SetMaxRetries 设置 RDAP 可恢复错误的额外重试次数（0=不重试）。
+func (c *Client) SetMaxRetries(n int) {
+	if n >= 0 {
+		c.maxRetries = n
+	}
+}
+
+// SetMinInterval 设置两次 RDAP 请求之间的最小间隔（<=0 关闭）。
+func (c *Client) SetMinInterval(d time.Duration) {
+	c.minInterval = d
 }
 
 // NormalizeDomain 规范化输入为 host 形式（小写、去协议/路径/www）。
@@ -155,27 +188,171 @@ func (c *Client) Check(ctx context.Context, raw string) Result {
 }
 
 func (c *Client) lookupRDAP(ctx context.Context, domain string) (out rdapOutcome, detail string) {
+	maxAttempts := 1 + c.maxRetries
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	var (
+		lastDetail        string
+		pendingRetryAfter time.Duration
+	)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			wait := c.retryWait(attempt, pendingRetryAfter)
+			if err := sleepCtx(ctx, wait); err != nil {
+				return rdapError, "rdap: " + err.Error()
+			}
+		}
+		if err := c.throttle(ctx); err != nil {
+			return rdapError, "rdap: " + err.Error()
+		}
+
+		out, detail, retryAfter, retryable := c.rdapOnce(ctx, domain)
+		lastDetail = detail
+		if !retryable {
+			return out, detail
+		}
+		pendingRetryAfter = retryAfter
+	}
+	return rdapError, lastDetail
+}
+
+func (c *Client) rdapOnce(ctx context.Context, domain string) (out rdapOutcome, detail string, retryAfter time.Duration, retryable bool) {
 	base := strings.TrimRight(c.rdapBase, "/")
 	u := base + "/" + url.PathEscape(domain)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return rdapError, "rdap: " + err.Error()
+		return rdapError, "rdap: " + err.Error(), 0, false
 	}
 	req.Header.Set("Accept", "application/rdap+json, application/json")
 	req.Header.Set("User-Agent", "domain-wind/1.0")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return rdapError, "rdap: " + err.Error()
+		return rdapError, "rdap: " + err.Error(), 0, isRetryableNetErr(err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return rdapTaken, "rdap=200"
+		return rdapTaken, "rdap=200", 0, false
 	case http.StatusNotFound:
-		return rdapNotFound, "rdap=404"
+		return rdapNotFound, "rdap=404", 0, false
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout:
+		ra := parseRetryAfter(resp.Header.Get("Retry-After"))
+		return rdapError, fmt.Sprintf("rdap=%d", resp.StatusCode), ra, true
 	default:
-		return rdapError, fmt.Sprintf("rdap=%d", resp.StatusCode)
+		return rdapError, fmt.Sprintf("rdap=%d", resp.StatusCode), 0, false
+	}
+}
+
+func (c *Client) throttle(ctx context.Context) error {
+	if c.minInterval <= 0 {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	wait := c.minInterval - time.Since(c.lastRDAP)
+	if wait > 0 {
+		if err := sleepCtx(ctx, wait); err != nil {
+			return err
+		}
+	}
+	c.lastRDAP = time.Now()
+	return nil
+}
+
+func (c *Client) retryWait(attempt int, retryAfter time.Duration) time.Duration {
+	if retryAfter > 0 {
+		return c.capRetryAfter(retryAfter)
+	}
+	base := c.backoffBase
+	if base <= 0 {
+		return 0
+	}
+	// attempt 从 1 起：400ms, 800ms, …
+	shift := attempt - 1
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > 4 {
+		shift = 4
+	}
+	d := base * time.Duration(1<<shift)
+	if d > maxRetryAfter {
+		d = maxRetryAfter
+	}
+	// 最多约 25% 抖动
+	jitter := time.Duration(rand.Int64N(int64(d/4) + 1))
+	return d + jitter
+}
+
+func (c *Client) capRetryAfter(d time.Duration) time.Duration {
+	if d > maxRetryAfter {
+		return maxRetryAfter
+	}
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if sec, err := strconv.Atoi(v); err == nil {
+		if sec < 0 {
+			return 0
+		}
+		return time.Duration(sec) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	return 0
+}
+
+func isRetryableNetErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, frag := range []string{
+		"timeout",
+		"temporary",
+		"connection reset",
+		"connection refused",
+		"i/o timeout",
+		"tls handshake timeout",
+		"eof",
+		"broken pipe",
+	} {
+		if strings.Contains(msg, frag) {
+			return true
+		}
+	}
+	return false
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
 	}
 }
 
@@ -185,6 +362,14 @@ func (c *Client) lookupNS(ctx context.Context, domain string) (hasNS, dnsErr boo
 		resolver = net.DefaultResolver
 	}
 	ns, err := resolver.LookupNS(ctx, domain)
+	if err != nil {
+		// 超时类再试一次
+		if isRetryableNetErr(err) {
+			if sleepErr := sleepCtx(ctx, 200*time.Millisecond); sleepErr == nil {
+				ns, err = resolver.LookupNS(ctx, domain)
+			}
+		}
+	}
 	if err != nil {
 		// NXDOMAIN / no such host → 无 NS
 		msg := err.Error()
@@ -203,11 +388,11 @@ func (c *Client) lookupNS(ctx context.Context, domain string) (hasNS, dnsErr boo
 	return false, false, "dns=no-ns"
 }
 
-// CheckAll 并发探测；conc<=0 时用默认 5。
+// CheckAll 并发探测；conc<=0 时用 DefaultConcurrency。
 func (c *Client) CheckAll(ctx context.Context, domains []string) []Result {
 	conc := c.conc
 	if conc <= 0 {
-		conc = 5
+		conc = DefaultConcurrency
 	}
 	type job struct {
 		i int

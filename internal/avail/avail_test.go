@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -75,6 +76,8 @@ func TestCheckRDAPWithMock(t *testing.T) {
 	c.rdapBase = strings.TrimRight(srv.URL, "/") + "/domain"
 	c.skipDNS = true
 	c.http = srv.Client()
+	c.minInterval = 0
+	c.backoffBase = 0
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -86,5 +89,77 @@ func TestCheckRDAPWithMock(t *testing.T) {
 	r2 := c.Check(ctx, "free.com")
 	if r2.Status != StatusLikelyFree {
 		t.Fatalf("free.com: %#v", r2)
+	}
+}
+
+func TestCheckRDAPRetries429ThenFree(t *testing.T) {
+	var hits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/domain/retry.com", func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		if n <= 2 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := New()
+	c.rdapBase = strings.TrimRight(srv.URL, "/") + "/domain"
+	c.skipDNS = true
+	c.http = srv.Client()
+	c.minInterval = 0
+	c.backoffBase = 0
+	c.maxRetries = 2
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	r := c.Check(ctx, "retry.com")
+	if r.Status != StatusLikelyFree {
+		t.Fatalf("retry.com status=%s detail=%s hits=%d", r.Status, r.Detail, hits.Load())
+	}
+	if hits.Load() != 3 {
+		t.Fatalf("hits=%d want 3", hits.Load())
+	}
+}
+
+func TestCheckRDAPExhaustsRetries(t *testing.T) {
+	var hits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/domain/busy.com", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := New()
+	c.rdapBase = strings.TrimRight(srv.URL, "/") + "/domain"
+	c.skipDNS = true
+	c.http = srv.Client()
+	c.minInterval = 0
+	c.backoffBase = 0
+	c.maxRetries = 2
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	r := c.Check(ctx, "busy.com")
+	if r.Status != StatusUnknown {
+		t.Fatalf("busy.com status=%s want unknown", r.Status)
+	}
+	if hits.Load() != 3 { // 1 + 2 retries
+		t.Fatalf("hits=%d want 3", hits.Load())
+	}
+}
+
+func TestDefaultConcurrency(t *testing.T) {
+	c := New()
+	if c.conc != DefaultConcurrency {
+		t.Fatalf("conc=%d want %d", c.conc, DefaultConcurrency)
 	}
 }
